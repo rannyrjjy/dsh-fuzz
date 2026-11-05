@@ -1,0 +1,19 @@
+# runtime state / evidence
+.dsh-fuzz/
+漏洞记录/
+runs/
+plans/
+seeds/
+*.pyc
+__pycache__/
+
+# node / packaging
+node_modules/
+*.tgz
+*.zip
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
