@@ -1,0 +1,5 @@
+{
+  "action": "harvest",
+  "target": "demo",
+  "response": "@examples/sample-response.json"
+}

@@ -1,0 +1,10 @@
+{
+  "action": "plan",
+  "kind": "idor",
+  "target": "demo",
+  "request": "@examples/sample-request.txt",
+  "seeds": "@examples/sample-seeds.json",
+  "params": ["id"],
+  "limit": 3,
+  "dryRun": true
+}

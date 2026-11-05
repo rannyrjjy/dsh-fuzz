@@ -1,0 +1,29 @@
+{
+  "name": "redirect",
+  "说明": "开放重定向 / SSO 回跳探针。看 Location 头是否跟随可控值。",
+  "sets": {
+    "basic": [
+      "https://evil.example/",
+      "//evil.example/",
+      "http://evil.example/",
+      "///evil.example/"
+    ],
+    "bypass": [
+      "https://target.example.evil.example/",
+      "/\\evil.example/",
+      "https:\\\\evil.example\\",
+      "%2f%2fevil.example%2f",
+      "https://evil.example%2f@target.example/",
+      "https://target.example@evil.example/"
+    ],
+    "param_names": [
+      "returnUrl",
+      "redirect_uri",
+      "service",
+      "url",
+      "next",
+      "callback"
+    ]
+  },
+  "pairs": {}
+}

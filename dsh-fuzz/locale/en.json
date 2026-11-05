@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Fuzz",
+    "description": "Differential fuzz and logic-test planner over the bundled diffprobe engine."
+  }
+}

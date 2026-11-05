@@ -1,0 +1,9 @@
+{
+  "name": "logic_amount",
+  "说明": "金额/数量/价格字段候选；只发只读或可回滚的赋值探测。",
+  "sets": {
+    "fields": ["amount", "price", "total", "payAmount", "pay_amount", "quantity", "num", "count", "fee", "balance", "quota"],
+    "values": ["-1", "0", "0.01", "0.001", "1e-3", "-0.01", "999999999999999999", "1.0000000001", "null", ""]
+  },
+  "pairs": {}
+}

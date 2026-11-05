@@ -1,0 +1,15 @@
+# Bundle patch layer: one row loads this package's main entry as the host half.
+# Defaults are resolved in index.js (engine next to this package, workspace =
+# the Host's current directory). Override here or from your own patch layer:
+#
+# - insert:
+#     - id: dsh-fuzz
+#       name: dsh-fuzz
+#       config:
+#         workspaceDir: 'C:\path\to\workspace'
+#         pythonPath: python3
+#         evidenceRoot: 漏洞记录
+#         timeoutMs: 300000
+- insert:
+    - id: dsh-fuzz
+      name: dsh-fuzz

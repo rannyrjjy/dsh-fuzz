@@ -1,0 +1,8 @@
+{
+  "name": "fuzz_params",
+  "说明": "隐藏参数名候选（高频）；用 diffprobe 追加到 query/body，检测被识别/被接受。",
+  "sets": {
+    "names": ["id", "uid", "userId", "user_id", "phone", "mobile", "tel", "phonenumber", "phoneNumber", "email", "orderId", "order_id", "orderNo", "order_no", "number", "no", "code", "key", "token", "ticket", "tenantId", "tenant_id", "orgId", "org_id", "shopId", "role", "isAdmin", "is_admin", "status", "type", "page", "size", "limit", "offset", "sort", "callback", "redirect", "url", "file", "fileId", "file_id", "path", "name", "username", "account", "amount", "price", "balance", "quota", "sign", "timestamp", "nonce", "debug", "test", "admin"]
+  },
+  "pairs": {}
+}

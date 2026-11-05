@@ -1,0 +1,93 @@
+{
+  "name": "signals",
+  "说明": "关键字信号预设。job 里写 \"options\": {\"keyword_presets\": [\"sqli_error\", \"java_stack\"]} 或 \"signals_from\": [\"lfi_linux\"]。命中即标 DIFF，用于把「有无回显」从人眼里搬到脚本里。",
+  "presets": {
+    "sqli_error": [
+      "You have an error in your SQL syntax",
+      "SQLSTATE",
+      "ORA-01756",
+      "ORA-00933",
+      "Microsoft OLE DB Provider for SQL Server",
+      "Unclosed quotation mark",
+      "PostgreSQL",
+      "psql:",
+      "SQLite3::query",
+      "java.sql.SQLException",
+      "org.hibernate.exception",
+      "MyBatisSystemException",
+      "com.mysql.jdbc.exceptions",
+      "Unknown column",
+      "syntax error at or near"
+    ],
+    "java_stack": [
+      "java.lang.",
+      "at org.springframework",
+      "at javax.servlet",
+      "Caused by:",
+      "org.apache.catalina",
+      "java.util.concurrent."
+    ],
+    "php_stack": [
+      "Fatal error",
+      "Warning: include",
+      "Warning: require",
+      "on line <b>",
+      "Stack trace:",
+      "Call to undefined function"
+    ],
+    "lfi_linux": [
+      "root:x:0:0:",
+      "/bin/bash",
+      "/bin/sh",
+      "nobody:x:"
+    ],
+    "lfi_windows": [
+      "[fonts]",
+      "[extensions]",
+      "for 16-bit app support",
+      "[boot loader]"
+    ],
+    "xxe_file": [
+      "root:x:0:0:",
+      "[fonts]"
+    ],
+    "cloud_meta": [
+      "ami-id",
+      "instance-id",
+      "iam/security-credentials",
+      "AccessKeyId",
+      "x-aws-ec2-metadata-token"
+    ],
+    "debug_leak": [
+      "Whitelabel Error Page",
+      "Stack trace",
+      "debug=true",
+      "ActiveProfiles",
+      "actuator",
+      "Traceback (most recent call last)"
+    ],
+    "waf_block": [
+      "您的请求已被拦截",
+      "请求被拒绝",
+      "Request Rejected",
+      "blocked by",
+      "安全狗",
+      "云锁",
+      "mod_security",
+      "The requested URL was rejected",
+      "Forbidden by WAF",
+      "web应用防火墙"
+    ],
+    "ssrf_hit": [
+      "Connection refused",
+      "Failed to connect",
+      "No route to host",
+      "timed out"
+    ],
+    "jwt_weak": [
+      "signature verification failed",
+      "JWT",
+      "eyJhbGciOiJIUzI1NiJ9"
+    ]
+  }
+}

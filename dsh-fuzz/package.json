@@ -1,0 +1,43 @@
+{
+  "name": "dsh-fuzz",
+  "version": "0.1.0",
+  "description": "Differential fuzzing and logic-test planner for DeepSeek Harness: harvest typed values, build diffprobe plans (idor/chain/massassign/role/tenant/amount/param/bypass + classic payload classes), run them under rate limits, and classify diffs and state changes.",
+  "icon": "icon.svg",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.0-rc.2 || >=0.2.1-rc.2 || >=0.2.2-rc.1"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./icon": "./icon.svg",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "engine/**",
+    "examples/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "fuzz",
+    "diffprobe",
+    "differential-testing",
+    "idor",
+    "access-control",
+    "security"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

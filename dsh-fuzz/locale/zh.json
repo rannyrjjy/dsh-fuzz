@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "差分 Fuzz",
+    "description": "在 diffprobe 引擎之上做抽值、计划生成与差分/状态判定的逻辑测试工具。"
+  }
+}

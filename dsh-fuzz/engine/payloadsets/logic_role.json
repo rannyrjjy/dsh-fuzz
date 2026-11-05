@@ -1,0 +1,9 @@
+{
+  "name": "logic_role",
+  "说明": "垂直越权/角色字段候选。只做赋值探测，不自动利用。",
+  "sets": {
+    "fields": ["role", "isAdmin", "is_admin", "userType", "user_type", "type", "permission", "level", "status", "audit"],
+    "values": ["admin", "administrator", "superadmin", "root", "1", "true", "0", "user", "staff", "tenant_admin", "owner"]
+  },
+  "pairs": {}
+}

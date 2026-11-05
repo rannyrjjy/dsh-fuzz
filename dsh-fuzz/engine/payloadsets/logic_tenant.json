@@ -1,0 +1,9 @@
+{
+  "name": "logic_tenant",
+  "说明": "租户/组织字段候选；值只做同类型替换，不批量枚举。",
+  "sets": {
+    "fields": ["tenantId", "tenant_id", "orgId", "org_id", "shopId", "shop_id", "companyId", "deptId", "groupId"],
+    "values": ["0", "1", "-1", "", "null", "00000000-0000-0000-0000-000000000000"]
+  },
+  "pairs": {}
+}

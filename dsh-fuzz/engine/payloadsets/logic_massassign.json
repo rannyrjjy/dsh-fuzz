@@ -1,0 +1,9 @@
+{
+  "name": "logic_massassign",
+  "说明": "mass assignment / 整对象回灌的字段候选；配合 verify 回读确认是否持久化。",
+  "sets": {
+    "fields": ["role", "isAdmin", "is_admin", "tenantId", "orgId", "balance", "quota", "status", "audit", "price", "amount", "ownerId", "userId", "level", "permission"],
+    "values": ["admin", "1", "true", "0", "-1", "999999", "approved", "null"]
+  },
+  "pairs": {}
+}
