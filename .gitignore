@@ -1,6 +1,7 @@
 # runtime state / evidence
 .dsh-fuzz/
 漏洞记录/
+evidence/
 runs/
 plans/
 seeds/

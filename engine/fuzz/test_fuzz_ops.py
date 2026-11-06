@@ -7,7 +7,7 @@ r"""fuzz_ops 回归自检（离线，不发任何网络请求）。
   2. 生成的计划没有 proxy 通道 → 无法经用户代理出口发包；
   3. sqli 计划只打 params[0]，且载荷集里已有的成对真假载荷没人用 → 真假不可判。
 
-跑法：python 作战工具\fuzz\test_fuzz_ops.py
+跑法：python engine/fuzz/test_fuzz_ops.py
 退出码 0 = 全过。
 """
 import json
@@ -32,7 +32,7 @@ def check(name, cond, detail=""):
 
 
 RAW = ("GET /api/search?keywords=test&page=1 HTTP/1.1\n"
-       "Host: 47.93.21.26\n"
+       "Host: example.com\n"
        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\n"
        "Connection: close\n")
 

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """bench_verdict.py - offline regression for fuzz_ops.classify_row.
 
-Scans every 漏洞记录/**/diffs.csv produced by diffprobe and compares the
+Scans every <evidence>/**/diffs.csv produced by diffprobe and compares the
 classifier against the engine's own verdict label. No network, no writes.
 
 Usage:

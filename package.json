@@ -1,6 +1,6 @@
 {
   "name": "dsh-fuzz",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Differential fuzzing and logic-test planner for DeepSeek Harness: harvest typed values, build diffprobe plans (idor/chain/massassign/role/tenant/amount/param/bypass + classic payload classes), run them under rate limits, and classify diffs and state changes.",
   "icon": "icon.svg",
   "type": "module",

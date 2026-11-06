@@ -28,8 +28,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent          # <repo>/engine/fuzz
 FUZZ = HERE
-# Engine root: <repo>/engine in this package; <workspace>/作战工具 in a workspace
-# install. Both layouts keep diffprobe/ and payloadsets/ as siblings of fuzz/.
+# Engine root: <repo>/engine in this package. diffprobe/ and payloadsets/
+# stay as siblings of fuzz/.
 ENGINE_ROOT = Path(os.environ.get("DSH_FUZZ_ENGINE") or HERE.parent).resolve()
 ENGINE = ENGINE_ROOT / "diffprobe" / "diffprobe.py"
 PAYLOADS = ENGINE_ROOT / "payloadsets"
@@ -112,7 +112,7 @@ def resolve_proxy(spec: dict, config_path: Path | None = None) -> str | None:
     """出站代理解析顺序：spec > FUZZ_PROXY > 工作区默认文件 > 环境 *_PROXY。
 
     环境里的 *_PROXY 跳过沙箱死端口哨兵 127.0.0.1:9。
-    工作区默认文件（作战工具\\fuzz\\proxy.json）是 DSH bundle 侧唯一能拿到的入口：
+    工作区默认文件（<engineRoot>/fuzz/proxy.json）是 DSH bundle 侧唯一能拿到的入口：
     bundle 的 fuzz 工具没有 proxy 入参，会话里无法临时传。
     """
     p = str(spec.get("proxy") or "").strip()
