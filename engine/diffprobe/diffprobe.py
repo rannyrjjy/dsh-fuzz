@@ -14,10 +14,11 @@ r"""
   python diffprobe.py --plan plans/example-vsb-dynclicks.json --out evidence/run1
 
 纪律（内置，不可绕过除非显式 --allow-destructive）：
-  · 默认 ≤20 请求/分钟、单线程
+  · 默认 8 线程、每请求 50ms；命中封禁信号后自动降为单线程 <6/分钟
+  · 计时敏感载荷（SLEEP/WAITFOR/...）自动退回单线程，避免并发污染时间差
   · 破坏性载荷（DROP/DELETE/UPDATE/INSERT/TRUNCATE/SHUTDOWN/xp_cmdshell/INTO OUTFILE）
     一律拒发
-  · 命中 stop_on_block（默认 403/429/503）立即停止整个矩阵并如实记录
+  · 命中 stop_on_block（默认 403/429/503）进入降级模式并如实记录
 """
 
 import argparse
@@ -30,10 +31,12 @@ import os
 import re
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 try:
@@ -123,6 +126,7 @@ def load_plan(path, mode="single"):
     with io.open(path, "r", encoding="utf-8-sig") as fh:
         plan = json.load(fh)
     plan.setdefault("scheme", "https")
+    plan["_rate_explicit"] = "rate_limit_per_min" in plan
     plan.setdefault("rate_limit_per_min", 20)
     plan.setdefault("baseline_repeat", 3)
     plan.setdefault("time_band_ms", 800)
@@ -297,6 +301,83 @@ class RateLimiter:
         self.count += 1
 
 
+class Pacer:
+    r"""并发节奏器：默认 N 线程、每请求 delay 秒；命中封禁后串行 <6/分钟。
+
+    未封禁：每个 worker 发送前 sleep(delay)，N 个 worker 并行推进。
+    封禁后：全局串行锁 + block_delay_s（默认 10s ⇒ <6/分钟），最多补发
+    max_after_block 条；超过后剩余任务记「未发送（防护中断）」。
+    """
+
+    def __init__(self, threads=8, delay_ms=50, block_delay_s=10.0, max_after_block=20):
+        self.threads = max(1, int(threads))
+        self.delay = max(0.0, float(delay_ms) / 1000.0)
+        self.block_delay = max(0.0, float(block_delay_s))
+        self.max_after_block = max(0, int(max_after_block))
+        self._blocked = threading.Event()
+        self._stop = threading.Event()
+        self._seq_lock = threading.Lock()
+        self._post_block = 0
+        self.lock = threading.Lock()  # 供调用方做计数等短临界区
+
+    @property
+    def blocked(self):
+        return self._blocked.is_set()
+
+    @property
+    def stopped(self):
+        return self._stop.is_set()
+
+    def block(self):
+        self._blocked.set()
+
+    def stop(self):
+        self._stop.set()
+
+    def wait(self):
+        """返回 False 表示不要再发（已停止）。"""
+        if self._stop.is_set():
+            return False
+        if not self._blocked.is_set():
+            if self.delay:
+                time.sleep(self.delay)
+            return True
+        with self._seq_lock:
+            if self._stop.is_set():
+                return False
+            if self._post_block >= self.max_after_block:
+                self._stop.set()
+                return False
+            if self.block_delay:
+                time.sleep(self.block_delay)
+            self._post_block += 1
+            return True
+
+    def snapshot(self):
+        return {"threads": self.threads, "delay_ms": int(round(self.delay * 1000)),
+                "blocked": self.blocked, "post_block": self._post_block,
+                "stopped": self.stopped}
+
+
+TIMING_RE = re.compile(
+    r"(?i)(?:\bsleep\s*\(|\bwaitfor\s+delay\b|\bpg_sleep\s*\(|"
+    r"\bbenchmark\s*\(|dbms_pipe\.receive_message|\bdelay\s*['\"]?\s*\d)")
+
+
+def _is_timing_sensitive(plan, mode):
+    """计时盲注/延时类载荷不能并发，否则并发抖动会污染 Δms。"""
+    if plan.get("timing_sensitive"):
+        return True
+    vals = []
+    if mode == "paired":
+        for pair in plan.get("pairs") or []:
+            vals.extend(pair if isinstance(pair, (list, tuple)) else [pair])
+    elif mode == "single":
+        for it in plan.get("payloads") or []:
+            vals.append(it if isinstance(it, str) else it.get("value", ""))
+    return any(TIMING_RE.search(str(v)) for v in vals)
+
+
 def _ssl_ctx(insecure, legacy=False):
     """insecure=不校验证书；legacy=放开 SECLEVEL 与最低版本，兼容只跑老旧 TLS 的 IoT/网络设备。"""
     ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
@@ -382,19 +463,18 @@ def median(vals):
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
 
 
-def run(plan, outdir, dry_run=False, insecure=True, timeout=20):
+def run(plan, outdir, dry_run=False, insecure=True, timeout=20, pacer=None):
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    limiter = RateLimiter(plan["rate_limit_per_min"])
-    records = []
+    pacer = pacer or Pacer()
+    records = [None] * len(plan["payloads"])
+    tasks = []
     idx = 0
-    blocked = None
-    stopped = None
 
-    for item in plan["payloads"]:
+    for pos, item in enumerate(plan["payloads"]):
         if isinstance(item, str):
             item = {"label": item, "value": item}
-        label = str(item.get("label") or ("p%d" % idx))
+        label = str(item.get("label") or ("p%d" % pos))
         value = item.get("value", "")
         raw = render_raw(plan["request_template"], value)
         safe_label = re.sub(r"[^0-9A-Za-z\-_.]", "_", label)[:40]
@@ -405,41 +485,51 @@ def run(plan, outdir, dry_run=False, insecure=True, timeout=20):
         decoded = urllib.parse.unquote(raw)
         hits = check_destructive(raw + "\n" + decoded + "\n" + value, plan["deny_patterns"])
         if hits:
-            records.append({
+            records[pos] = {
                 "label": label, "payload": value, "status": "-", "len": 0,
                 "ms": 0, "delta_ms": 0, "sha256": "-", "markers": "",
                 "verdict": "拒发", "reason": "破坏性载荷：%s" % ",".join(hits[:3]),
                 "evidence": "-",
-            })
+            }
             continue
 
         try:
             req = parse_raw(raw)
             url = build_url(req, plan["scheme"])
         except Exception as exc:
-            records.append({
+            records[pos] = {
                 "label": label, "payload": value, "status": "-", "len": 0,
                 "ms": 0, "delta_ms": 0, "sha256": "-", "markers": "",
                 "verdict": "模板错误", "reason": str(exc), "evidence": "-",
-            })
+            }
             continue
 
         if dry_run:
-            records.append({
+            records[pos] = {
                 "label": label, "payload": value, "status": "(dry)", "len": 0,
                 "ms": 0, "delta_ms": 0, "sha256": "-", "markers": "",
                 "verdict": "未发送", "reason": url, "evidence": "-",
-            })
+            }
             continue
 
-        limiter.wait()
+        tasks.append((pos, idx, label, value, raw, req, url, safe_label, item))
+
+    def work(t):
+        pos, tidx, label, value, raw, req, url, safe_label, item = t
+        if not pacer.wait():
+            return pos, {
+                "label": label, "payload": value, "status": "-", "len": 0,
+                "ms": 0, "delta_ms": 0, "sha256": "-", "markers": "",
+                "verdict": "未发送（防护中断）", "reason": "封禁后达到补发上限",
+                "evidence": "-",
+            }
         res = send(req, url, timeout=timeout, insecure=insecure,
                    legacy_tls=bool(plan.get("tls_legacy")))
         body_text = res["body"].decode("utf-8", errors="replace")
-        rq = outdir / ("%03d_%s.req" % (idx, safe_label))
-        rs = outdir / ("%03d_%s.resp" % (idx, safe_label))
+        rq = outdir / ("%03d_%s.req" % (tidx, safe_label))
+        rs = outdir / ("%03d_%s.resp" % (tidx, safe_label))
         dump_exchange(rq, rs, raw, url, res)
-        records.append({
+        rec = {
             "label": label, "payload": value, "status": res["status"],
             "len": len(res["body"]), "ms": res["ms"], "delta_ms": 0,
             "sha256": digest(res["body"]),
@@ -449,13 +539,40 @@ def run(plan, outdir, dry_run=False, insecure=True, timeout=20):
             "is_baseline": bool(item.get("is_baseline")),
             "body": res["body"],
             "headers": res.get("headers") or [],
-        })
+        }
         if res["status"] in plan["stop_on_block"]:
-            blocked = res["status"]
-            stopped = label
-            break
+            pacer.block()
+        return pos, rec
 
-    return _analyze(plan, records, blocked, stopped)
+    if tasks:
+        with ThreadPoolExecutor(max_workers=pacer.threads) as ex:
+            futs = {ex.submit(work, t): t for t in tasks}
+            for fut in as_completed(futs):
+                t = futs[fut]
+                try:
+                    pos, rec = fut.result()
+                except Exception as exc:
+                    pos, rec = t[0], {
+                        "label": t[2], "payload": t[3], "status": "-", "len": 0,
+                        "ms": 0, "delta_ms": 0, "sha256": "-", "markers": "",
+                        "verdict": "错误", "reason": "%s: %s" % (type(exc).__name__, exc),
+                        "evidence": "-"}
+                records[pos] = rec
+
+    for i, rec in enumerate(records):
+        if rec is None:
+            records[i] = {"label": "p%d" % i, "payload": "", "status": "-", "len": 0,
+                          "ms": 0, "delta_ms": 0, "sha256": "-", "markers": "",
+                          "verdict": "未发送（防护中断）", "reason": "未派发",
+                          "evidence": "-"}
+
+    blocked = next((r["status"] for r in records
+                    if r.get("status") in plan["stop_on_block"]), None)
+    stopped = next((r["label"] for r in records
+                    if r.get("status") in plan["stop_on_block"]), None)
+    result = _analyze(plan, records, blocked, stopped)
+    result["concurrency"] = pacer.snapshot()
+    return result
 
 
 def _sim(a, b):
@@ -469,22 +586,28 @@ PAIR_COLS = ["pair", "label_a", "label_b", "status_a", "status_b", "len_a", "len
              "verdict", "reason", "evidence_a", "evidence_b"]
 
 
-def run_pairs(plan, outdir, dry_run=False, insecure=True, timeout=20):
+def run_pairs(plan, outdir, dry_run=False, insecure=True, timeout=20, pacer=None):
     """A/B 配对模式：不依赖基线，两发互比。适合布尔盲注、时间盲注、ID 相邻对照。
 
     净长度差 net_len = (len_b − len_a) − (len(B) − len(A))，抵消载荷自身长度差与回显干扰。
+    并发粒度是“对”：同一对的 A/B 串行发送（保住时间差语义），不同对并行。
     """
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    limiter = RateLimiter(plan["rate_limit_per_min"])
-    rows, stopped, blocked, idx = [], None, None, 0
-    tol = float(plan.get("pair_len_tol", 0))
-
-    for pj, pair in enumerate(plan.get("pairs") or [], 1):
+    pacer = pacer or Pacer()
+    pairs = plan.get("pairs") or []
+    for pj, pair in enumerate(pairs, 1):
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
             raise SystemExit("[error] pairs 每项必须是 [A, B] 两元素，出错项：%r" % (pair,))
+    rows = [None] * len(pairs)
+    tol = float(plan.get("pair_len_tol", 0))
+    sent = [0]
+    sent_lock = threading.Lock()
+
+    def work(pj, pair):
         obs = []
-        for side, value in zip(("A", "B"), pair):
+        for side_i, side in enumerate(("A", "B")):
+            value = pair[side_i]
             raw = render_raw(plan["request_template"], value)
             decoded = urllib.parse.unquote(raw)
             hits = check_destructive(raw + "\n" + decoded + "\n" + value, plan["deny_patterns"])
@@ -500,17 +623,23 @@ def run_pairs(plan, outdir, dry_run=False, insecure=True, timeout=20):
             if dry_run:
                 obs.append({"value": value, "dry": True, "url": url, "raw": raw})
                 continue
-            limiter.wait()
+            if not pacer.wait():
+                obs.append({"value": value, "error": "未发送（防护中断）"})
+                continue
             res = send(req, url, timeout=timeout, insecure=insecure,
                        legacy_tls=bool(plan.get("tls_legacy")))
-            idx += 1
+            with sent_lock:
+                sent[0] += 1
+            tidx = (pj - 1) * 2 + side_i + 1
             safe = re.sub(r"[^\w\-.]", "_", "pair%d%s" % (pj, side))[:40]
-            rq = outdir / ("%03d_%s.req" % (idx, safe))
-            rs = outdir / ("%03d_%s.resp" % (idx, safe))
+            rq = outdir / ("%03d_%s.req" % (tidx, safe))
+            rs = outdir / ("%03d_%s.resp" % (tidx, safe))
             dump_exchange(rq, rs, raw, url, res)
             obs.append({"value": value, "status": res["status"], "body": res["body"],
                         "ms": res["ms"], "raw": raw, "url": url,
                         "evidence": "%s / %s" % (rq.name, rs.name)})
+            if res["status"] in plan["stop_on_block"]:
+                pacer.block()
 
         a, b = obs[0], obs[1]
         row = {"pair": pj, "label_a": repr(pair[0]), "label_b": repr(pair[1]),
@@ -524,12 +653,10 @@ def run_pairs(plan, outdir, dry_run=False, insecure=True, timeout=20):
         if a.get("error") or b.get("error"):
             row["verdict"] = "拒发/错误"
             row["reason"] = a.get("error") or b.get("error")
-            rows.append(row)
-            continue
+            return pj - 1, row
         if a.get("dry") or b.get("dry"):
             row["reason"] = "%s vs %s" % (a.get("url"), b.get("url"))
-            rows.append(row)
-            continue
+            return pj - 1, row
 
         net = (row["len_b"] - row["len_a"]) - (len(pair[1]) - len(pair[0]))
         row["net_len"] = net
@@ -553,21 +680,48 @@ def run_pairs(plan, outdir, dry_run=False, insecure=True, timeout=20):
             reasons.append("响应体相似度 %.4f" % sim)
         row["verdict"] = "DIFF" if reasons else "SAME"
         row["reason"] = "；".join(reasons) or "两发在四个维度上一致"
-        rows.append(row)
+        return pj - 1, row
 
-        for o in (a, b):
-            if o.get("status") in plan["stop_on_block"]:
-                blocked, stopped = o["status"], "pair%d" % pj
-                break
-        if stopped:
+    if pairs:
+        with ThreadPoolExecutor(max_workers=pacer.threads) as ex:
+            futs = {ex.submit(work, pj, pair): (pj - 1, pair)
+                    for pj, pair in enumerate(pairs, 1)}
+            for fut in as_completed(futs):
+                i, pair = futs[fut]
+                try:
+                    _, row = fut.result()
+                except Exception as exc:
+                    row = {"pair": i + 1, "label_a": repr(pair[0]), "label_b": repr(pair[1]),
+                           "status_a": "-", "status_b": "-", "len_a": 0, "len_b": 0,
+                           "net_len": 0, "ms_a": 0, "ms_b": 0, "delta_ms": 0,
+                           "similarity": "-", "markers": "", "verdict": "错误",
+                           "reason": "%s: %s" % (type(exc).__name__, exc),
+                           "evidence_a": "-", "evidence_b": "-"}
+                rows[i] = row
+
+    blocked = None
+    stopped = None
+    for r in rows:
+        if not r:
+            continue
+        hit_a = r.get("status_a") in plan["stop_on_block"]
+        hit_b = r.get("status_b") in plan["stop_on_block"]
+        if hit_a or hit_b:
+            blocked = r.get("status_a") if hit_a else r.get("status_b")
+            stopped = "pair%d" % r["pair"]
             break
 
     return {"name": plan["name"], "pairs": rows, "blocked": blocked,
-            "stopped": stopped, "requests": idx}
+            "stopped": stopped, "requests": sent[0], "concurrency": pacer.snapshot()}
 
 
 def report_pairs(result):
     lines = ["", "=== 配对判定：%s ===" % result["name"], ""]
+    conc = result.get("concurrency") or {}
+    if conc:
+        lines.append("节奏：%s 线程 / %sms%s" % (
+            conc.get("threads"), conc.get("delay_ms"),
+            "；已触发防护，后续单线程 <6/分钟" if conc.get("blocked") else ""))
     diffs = [r for r in result["pairs"] if r["verdict"] == "DIFF"]
     lines.append("配对 %d 组 ｜ 有差分 %d 组 ｜ 请求 %d 次" % (
         len(result["pairs"]), len(diffs), result["requests"]))
@@ -576,9 +730,12 @@ def report_pairs(result):
         if r["evidence_a"] != "-":
             lines.append("             证据 %s / %s" % (r["evidence_a"], r["evidence_b"]))
     if result["blocked"]:
+        conc = result.get("concurrency") or {}
+        tail = ("已进入单线程 <6/分钟降级，达到补发上限后停止"
+                if conc.get("blocked") else "已进入降级模式")
         lines.append("")
-        lines.append("!! 触发防护（%s），矩阵已在 %s 中断 —— 该目标标记「已触发防护」" % (
-            result["blocked"], result["stopped"]))
+        lines.append("!! 触发防护（%s，%s）——%s；该目标标记「已触发防护」" % (
+            result["blocked"], result["stopped"], tail))
     lines.append("")
     lines.append("判定纪律：DIFF 只代表两发存在差异，须扩大样本后才能定性；SAME 是该假设的证伪依据。")
     return "\n".join(lines)
@@ -588,23 +745,25 @@ def _hdr_block(headers):
     return "\n".join("%s: %s" % (k, v) for k, v in (headers or {}).items())
 
 
-def run_matrix(plan, outdir, dry_run=False, insecure=True, timeout=20):
+def run_matrix(plan, outdir, dry_run=False, insecure=True, timeout=20, pacer=None):
     r"""多身份 × 多对象 权限矩阵。
 
     为什么不能只做 A/B：越权的最小证据是"**同一对象、不同主体**"的差异，
     对照组必须包含"自己的对象"（应允许）与"他人的对象"（应拒绝），
     否则无法排除"该接口本来就公开"。
+    并发粒度是“格”：不同身份×对象组合并行；结果按行列汇总。
     """
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
+    pacer = pacer or Pacer()
     identities = plan.get("identities") or []
     objects = plan.get("objects") or []
     if not identities or not objects:
         raise SystemExit("[error] matrix 模式需要 plan.identities 与 plan.objects")
-    limiter = RateLimiter(plan["rate_limit_per_min"])
     rows = [str(i.get("label") or i.get("name")) for i in identities]
     cols = [str(o.get("label") or o.get("value")) for o in objects]
-    cells, idx, blocked, stopped = {}, 0, None, None
+    cells, tasks, idx, sent = {}, [], 0, [0]
+    sent_lock = threading.Lock()
 
     # 权限矩阵里 403 往往是"本该拒绝"的正确表现，不是防护层拦截。
     # 默认把 403 从停手清单里摘掉，只保留 429/503；要改回严格模式请显式设 stop_on_403=true。
@@ -637,38 +796,73 @@ def run_matrix(plan, outdir, dry_run=False, insecure=True, timeout=20):
                 cell["note"] = url
                 cells[(row, col)] = cell
                 continue
-            limiter.wait()
-            res = send(req, url, timeout=timeout, insecure=insecure,
-                       legacy_tls=bool(plan.get("tls_legacy")))
             idx += 1
-            safe = re.sub(r"[^\w\-.]", "_", "%s__%s" % (row, col))[:48]
-            rq = outdir / ("%03d_%s.req" % (idx, safe))
-            rs = outdir / ("%03d_%s.resp" % (idx, safe))
-            dump_exchange(rq, rs, raw, url, res)
-            cell.update({"status": res["status"], "verdict": dps.classify_cell(res["status"]),
-                         "len": len(res["body"]), "sha256": digest(res["body"]),
-                         "evidence": "%s / %s" % (rq.name, rs.name),
-                         "set_cookie": [v for k, v in (res.get("headers") or [])
-                                        if k.lower() == "set-cookie"]})
-            owner = str(obj.get("owner") or "")
-            cross = owner and row != owner and row not in ("admin", "管理员")
-            if cross and cell["verdict"] == dps.ALLOW:
-                cell["flag"] = "越权候选"
-                cell["note"] = "对象 owner=%s，本行为 %s，却返回 2xx" % (owner, row)
-            cells[(row, col)] = cell
-            if res["status"] in matrix_stop:
-                blocked, stopped = res["status"], "%s×%s" % (row, col)
-                break
-        if blocked:
+            tasks.append((row, col, obj, raw, req, url, idx))
+
+    def work(t):
+        row, col, obj, raw, req, url, tidx = t
+        if not pacer.wait():
+            return (row, col), {"row": row, "col": col, "status": "-",
+                                "verdict": dps.UNKNOWN, "flag": "", "evidence": "-",
+                                "note": "未发送（防护中断）"}
+        res = send(req, url, timeout=timeout, insecure=insecure,
+                   legacy_tls=bool(plan.get("tls_legacy")))
+        with sent_lock:
+            sent[0] += 1
+        safe = re.sub(r"[^\w\-.]", "_", "%s__%s" % (row, col))[:48]
+        rq = outdir / ("%03d_%s.req" % (tidx, safe))
+        rs = outdir / ("%03d_%s.resp" % (tidx, safe))
+        dump_exchange(rq, rs, raw, url, res)
+        cell = {"row": row, "col": col, "status": res["status"],
+                "verdict": dps.classify_cell(res["status"]),
+                "len": len(res["body"]), "sha256": digest(res["body"]),
+                "evidence": "%s / %s" % (rq.name, rs.name),
+                "flag": "", "note": "",
+                "set_cookie": [v for k, v in (res.get("headers") or [])
+                               if k.lower() == "set-cookie"]}
+        owner = str(obj.get("owner") or "")
+        cross = owner and row != owner and row not in ("admin", "管理员")
+        if cross and cell["verdict"] == dps.ALLOW:
+            cell["flag"] = "越权候选"
+            cell["note"] = "对象 owner=%s，本行为 %s，却返回 2xx" % (owner, row)
+        if res["status"] in matrix_stop:
+            pacer.block()
+        return (row, col), cell
+
+    if tasks:
+        with ThreadPoolExecutor(max_workers=pacer.threads) as ex:
+            futs = {ex.submit(work, t): t for t in tasks}
+            for fut in as_completed(futs):
+                t = futs[fut]
+                try:
+                    key, cell = fut.result()
+                except Exception as exc:
+                    key = (t[0], t[1])
+                    cell = {"row": t[0], "col": t[1], "status": "-",
+                            "verdict": dps.UNKNOWN, "flag": "", "evidence": "-",
+                            "note": "%s: %s" % (type(exc).__name__, exc)}
+                cells[key] = cell
+
+    blocked = None
+    stopped = None
+    for (row, col), cell in cells.items():
+        if cell.get("status") in matrix_stop:
+            blocked, stopped = cell["status"], "%s×%s" % (row, col)
             break
 
     return {"name": plan["name"], "rows": rows, "cols": cols, "cells": cells,
-            "requests": idx, "blocked": blocked, "stopped": stopped,
-            "objects": objects, "identities": rows}
+            "requests": sent[0], "blocked": blocked, "stopped": stopped,
+            "objects": objects, "identities": rows,
+            "concurrency": pacer.snapshot()}
 
 
 def report_matrix(result):
     lines = ["", "=== 权限矩阵：%s ===" % result["name"], ""]
+    conc = result.get("concurrency") or {}
+    if conc:
+        lines.append("节奏：%s 线程 / %sms%s" % (
+            conc.get("threads"), conc.get("delay_ms"),
+            "；已触发防护，后续单线程 <6/分钟" if conc.get("blocked") else ""))
     cell_map = {(r, c): result["cells"][(r, c)] for r, c in result["cells"]}
     lines.append(dps.render_matrix(result["rows"], result["cols"], cell_map))
     lines.append("")
@@ -686,8 +880,11 @@ def report_matrix(result):
         lines.append("")
         lines.append("签发会话的上下文：%s" % "、".join(sorted(issued)))
     if result["blocked"]:
+        conc = result.get("concurrency") or {}
+        tail = ("已进入单线程 <6/分钟降级，达到补发上限后停止"
+                if conc.get("blocked") else "已进入降级模式")
         lines.append("")
-        lines.append("!! 触发防护（%s），矩阵已在 %s 中断" % (result["blocked"], result["stopped"]))
+        lines.append("!! 触发防护（%s，%s）——%s" % (result["blocked"], result["stopped"], tail))
     lines.append("")
     lines.append("判定纪律：2xx 只说明服务端执行了动作，不等于越权；")
     lines.append("          必须确认返回对象确实属于他人（比对 owner 字段），并排除该接口本就公开。")
@@ -779,11 +976,16 @@ def run_sequence(plan, outdir, dry_run=False, insecure=True, timeout=20):
         if blocked:
             break
 
-    return {"name": plan["name"], "runs": runs, "requests": idx, "blocked": blocked}
+    return {"name": plan["name"], "runs": runs, "requests": idx, "blocked": blocked,
+            "concurrency": {"threads": 1,
+                            "delay_ms": int(round(60000.0 / max(1, plan["rate_limit_per_min"]))),
+                            "blocked": bool(blocked), "post_block": 0, "stopped": False,
+                            "note": "状态机顺序执行，不并发"}}
 
 
 def report_sequence(result):
     lines = ["", "=== 状态机差分：%s ===" % result["name"], ""]
+    lines.append("节奏：状态机顺序执行（不并发）")
     normal = next((r for r in result["runs"] if "正常" in r["variant"]), result["runs"][0])
     lines.append("基准变体：%s ｜ 指纹 %s" % (normal["variant"], normal["fingerprint"][:120]))
     lines.append("")
@@ -965,6 +1167,11 @@ def report(result, quiet=False):
     b = result["band"]
     lines = []
     lines.append("=== 差分探针：%s ===" % result["name"])
+    conc = result.get("concurrency") or {}
+    if conc:
+        lines.append("节奏：%s 线程 / %sms%s" % (
+            conc.get("threads"), conc.get("delay_ms"),
+            "；已触发防护，后续单线程 <6/分钟" if conc.get("blocked") else ""))
     lines.append("基线：status=%s len=%s（波动带 ±%d）ms=%s 重复=%d" % (
         b["baseline_status"], b["baseline_len"], b["len_spread"],
         b["baseline_ms"], b["baseline_repeats"]))
@@ -986,13 +1193,17 @@ def report(result, quiet=False):
         else:
             lines.append("语义层：已请求但基线不是 JSON —— 本轮只有传输层结论。")
     if result["blocked_status"]:
-        lines.append("!! 命中防护层 %s（在 %s 处停止矩阵）——该目标标记为「已触发防护」，须立即停手"
-                     % (result["blocked_status"], result["stopped_at"]))
+        conc = result.get("concurrency") or {}
+        tail = ("已进入单线程 <6/分钟降级，达到补发上限后停止"
+                if conc.get("blocked") else "已进入降级模式")
+        lines.append("!! 命中防护层 %s（在 %s 处）——%s；该目标标记为「已触发防护」"
+                     % (result["blocked_status"], result["stopped_at"], tail))
     diffs = [r for r in result["records"] if r["verdict"] == "差分"]
     sems = [r for r in result["records"] if r["verdict"] == "语义差分"]
     voids = [r for r in result["records"] if r["verdict"].startswith("无效")]
-    other = [r for r in result["records"] if r["verdict"] in ("拒发", "模板错误")]
-    sent = [r for r in result["records"] if r["verdict"] not in ("未发送", "拒发", "模板错误")]
+    other = [r for r in result["records"]
+             if r["verdict"].startswith("未发送") or r["verdict"] in ("拒发", "模板错误", "错误")]
+    sent = [r for r in result["records"] if r not in other]
     lines.append("")
     if not sent:
         lines.append("dry-run：未发送任何请求 —— 差分结论不适用（不是「无差分」）。")
@@ -1052,6 +1263,16 @@ def main(argv=None):
                     help="放行破坏性载荷（默认拒发；仅在明确授权且可回滚时使用）")
     ap.add_argument("--insecure", action="store_true", default=True)
     ap.add_argument("--timeout", type=int, default=20)
+    ap.add_argument("--threads", type=int, default=None,
+                    help="并发线程数（默认 8；1=单线程）")
+    ap.add_argument("--delay-ms", type=int, default=None,
+                    help="每个 worker 的请求间隔毫秒（默认 50）")
+    ap.add_argument("--sequential", action="store_true",
+                    help="强制单线程（计时敏感/状态机自动生效）")
+    ap.add_argument("--block-delay-s", type=float, default=10.0,
+                    help="触发防护后的串行间隔秒（默认 10 ⇒ <6/分钟）")
+    ap.add_argument("--max-after-block", type=int, default=20,
+                    help="触发防护后最多补发条数（默认 20），超过即停")
     args = ap.parse_args(argv)
 
     plan = load_plan(args.plan, args.mode)
@@ -1062,11 +1283,36 @@ def main(argv=None):
     if args.mode == "semantic":
         plan["_force_semantic"] = True
 
+    # 并发解析：CLI > plan > 旧 rate_limit_per_min（显式时串行）> 默认 8/50ms。
+    threads = args.threads
+    delay_ms = args.delay_ms
+    if args.sequential:
+        threads = 1
+    if threads is None:
+        threads = plan.get("threads")
+    if delay_ms is None:
+        delay_ms = plan.get("delay_ms")
+    if threads is None:
+        if plan.get("_rate_explicit"):
+            threads = 1
+            if delay_ms is None:
+                delay_ms = 60000.0 / max(1, plan["rate_limit_per_min"])
+        else:
+            threads = 8
+    if delay_ms is None:
+        delay_ms = 50
+    threads = max(1, int(threads))
+    if args.mode == "sequence" or _is_timing_sensitive(plan, args.mode):
+        threads = 1
+    pacer = Pacer(threads=threads, delay_ms=delay_ms,
+                  block_delay_s=args.block_delay_s,
+                  max_after_block=args.max_after_block)
+
     if args.mode == "paired":
         outdir = Path(args.out) if args.out else (
             HERE / "_runs" / re.sub(r"[^\w\-.]", "_", plan["name"]))
         result = run_pairs(plan, outdir, dry_run=args.dry_run,
-                           insecure=args.insecure, timeout=args.timeout)
+                           insecure=args.insecure, timeout=args.timeout, pacer=pacer)
         print(report_pairs(result))
         if not args.dry_run:
             p = outdir / "pairs.csv"
@@ -1084,7 +1330,7 @@ def main(argv=None):
         outdir = Path(args.out) if args.out else (
             HERE / "_runs" / re.sub(r"[^\w\-.]", "_", plan["name"]))
         result = run_matrix(plan, outdir, dry_run=args.dry_run,
-                            insecure=args.insecure, timeout=args.timeout)
+                            insecure=args.insecure, timeout=args.timeout, pacer=pacer)
         print(report_matrix(result))
         if not args.dry_run:
             p = outdir / "matrix.json"
@@ -1141,7 +1387,8 @@ def main(argv=None):
     plan["payloads"] = expanded
 
     outdir = Path(args.out) if args.out else (HERE / "_runs" / re.sub(r"[^\w\-.]", "_", plan["name"]))
-    result = run(plan, outdir, dry_run=args.dry_run, insecure=args.insecure, timeout=args.timeout)
+    result = run(plan, outdir, dry_run=args.dry_run, insecure=args.insecure,
+                 timeout=args.timeout, pacer=pacer)
 
     print(report(result))
     if not args.dry_run:

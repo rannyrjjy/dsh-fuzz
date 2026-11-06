@@ -6,15 +6,9 @@ Read-only by default. The packet engine is always diffprobe; this script only
 builds plans, harvests typed values, invokes diffprobe and classifies results.
 
 Usage:
-  python engine/fuzz/fuzz_ops.py --spec examples/doctor.json
-  python engine/fuzz/fuzz_ops.py harvest --response @resp.json --target demo
+  python engine/fuzz/fuzz_ops.py --spec spec.json
+  python engine/fuzz/fuzz_ops.py harvest  --response @resp.json --target demo
   python engine/fuzz/fuzz_ops.py doctor
-
-Environment:
-  DSH_FUZZ_WORKSPACE     workspace root (default: current directory)
-  DSH_FUZZ_EVIDENCE_DIR  evidence folder name under the workspace (default: 漏洞记录)
-  DSH_FUZZ_STATE         plans/seeds/runs root (default: <workspace>/.dsh-fuzz)
-  DSH_FUZZ_ENGINE        engine root holding diffprobe/ and payloadsets/
 
 Spec actions: harvest, plan, run, verdict, bizmap, doctor.
 """
@@ -22,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import io
+import itertools
 import json
 import os
 import re
@@ -83,8 +78,66 @@ def load_json_arg(value):
     return json.loads(text)
 
 
+_TAG_SEQ = itertools.count(1)
+
+# 沙箱把 *_PROXY 注入成 127.0.0.1:9 哨兵（死端口），照抄会全量失败。
+DEAD_PROXY = "http://127.0.0.1:9"
+
+
 def now_tag() -> str:
-    return time.strftime("%Y%m%d-%H%M%S")
+    """秒级精度会同秒撞名。
+
+    实测：同一秒内并发发三次 plan，输出名都是 <秒>-<kind>-<i>.json，
+    后发的直接覆盖先发的（plan 丢失、证据链断掉）。
+    改为 毫秒 + 进程内序号，再由 unique_path() 兜底。
+    """
+    ms = (time.time_ns() // 1_000_000) % 1000
+    return f"{time.strftime('%Y%m%d-%H%M%S')}-{ms:03d}-{next(_TAG_SEQ):03d}"
+
+
+def unique_path(directory: Path, filename: str) -> Path:
+    """同名加序号，绝不覆盖已存在的文件。"""
+    p = directory / filename
+    if not p.exists():
+        return p
+    stem, suffix = p.stem, p.suffix
+    for n in range(2, 1000):
+        q = directory / f"{stem}-{n}{suffix}"
+        if not q.exists():
+            return q
+    return directory / f"{stem}-{os.getpid()}{suffix}"
+
+
+def resolve_proxy(spec: dict, config_path: Path | None = None) -> str | None:
+    """出站代理解析顺序：spec > FUZZ_PROXY > 工作区默认文件 > 环境 *_PROXY。
+
+    环境里的 *_PROXY 跳过沙箱死端口哨兵 127.0.0.1:9。
+    工作区默认文件（作战工具\\fuzz\\proxy.json）是 DSH bundle 侧唯一能拿到的入口：
+    bundle 的 fuzz 工具没有 proxy 入参，会话里无法临时传。
+    """
+    p = str(spec.get("proxy") or "").strip()
+    if p:
+        return p
+    p = str(os.environ.get("FUZZ_PROXY") or "").strip()
+    if p:
+        return p
+    cfg = config_path if config_path is not None else (FUZZ / "proxy.json")
+    try:
+        if cfg and Path(cfg).exists():
+            data = json.loads(Path(cfg).read_text(encoding="utf-8-sig"))
+            p = str(data.get("proxy") or "").strip()
+            if p:
+                return p
+    except Exception:  # noqa: BLE001 - 配置文件坏了不该拖垮整个计划流程
+        pass
+    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        v = str(os.environ.get(var) or "").strip()
+        if not v:
+            continue
+        if v.rstrip("/").lower() == DEAD_PROXY:
+            continue
+        return v
+    return None
 
 
 # ---------------------------------------------------------------- raw HTTP
@@ -403,6 +456,50 @@ def build_payloads(req: dict, param: str, existing: bool, kind: str,
     return payloads
 
 
+def _iter_pairs(obj):
+    """把载荷集里的成对结构摊平成 (真, 假) 序列。"""
+    if isinstance(obj, dict):
+        for v in obj.values():
+            yield from _iter_pairs(v)
+    elif isinstance(obj, (list, tuple)):
+        if len(obj) >= 2 and all(isinstance(x, str) for x in obj[:2]):
+            yield (obj[0], obj[1])
+        else:
+            for v in obj:
+                yield from _iter_pairs(v)
+
+
+def sqli_pairs() -> list[tuple[str, str]]:
+    """成对布尔载荷：每组是 (真, 假)。
+
+    差分探针只有在"同一注入点、真假两次"的前提下才能把长度抖动和注入区分开；
+    载荷集里早就写了 pairs，之前没人用，plan 只能给出单发载荷 → 真假不可判。
+
+    优先用 pairs_all（不含 SLEEP 等时间盲注，避免每组白等 3 秒）；
+    没有 pairs_all 时只取 boolean/error 两组，时间组不进默认计划。
+    """
+    data = load_set("sqli")
+    groups = []
+    if data.get("pairs_all"):
+        groups.append(data["pairs_all"])
+    elif isinstance(data.get("pairs"), dict):
+        groups.append({k: v for k, v in data["pairs"].items() if k in ("boolean", "error")})
+    out: list[tuple[str, str]] = []
+    for g in groups:
+        out.extend((str(a), str(b)) for a, b in _iter_pairs(g))
+    return out
+
+
+def build_sqli_payloads(req: dict, param: str, existing: bool) -> list[dict]:
+    """基线 + 成对真假 + 对照，合计 ≤10 发（单端点请求上限）。"""
+    payloads = [{"label": "baseline", "value": make_baseline(req, param, existing), "baseline": True}]
+    for i, (t, f) in enumerate(sqli_pairs()[:4], 1):
+        payloads.append({"label": f"true-{i}", "value": t})
+        payloads.append({"label": f"false-{i}", "value": f})
+    payloads.append({"label": "control", "value": "control_value"})
+    return payloads
+
+
 def replace_path_segment(req: dict, segment: str) -> str:
     base, sep, query = req["path"].partition("?")
     parts = base.split("/")
@@ -443,6 +540,9 @@ def make_bypass_plan(spec: dict, req: dict, segment: str, verify: dict | None, i
         "meta": {"candidate": {"param": segment, "score": 3.0, "kind": "path-segment"},
                  "generated_at": now_tag(), "source": spec.get("source") or "manual"},
     }
+    proxy = resolve_proxy(spec)
+    if proxy:
+        plan["proxy"] = proxy
     if verify:
         plan["verify"] = verify
     return plan
@@ -454,6 +554,8 @@ def make_plan(spec: dict, kind: str, req: dict, param: str, existing: bool,
     if existing:
         template = replace_param(req, param)
         payloads = build_payloads(req, param, True, kind, seeds, values)
+        if kind == "sqli":
+            payloads = build_sqli_payloads(req, param, True)
     else:
         template = append_fragment(req)
         baseline = ""
@@ -485,15 +587,13 @@ def make_plan(spec: dict, kind: str, req: dict, param: str, existing: bool,
         "meta": {"candidate": candidate, "generated_at": now_tag(),
                  "source": spec.get("source") or "manual"},
     }
-    # Always ask for the semantic layer: it only engages when the response parses
-    # as JSON, and it is what lets verdict tell an error branch apart from a real
-    # state/data change. Volatile keys are ignored to keep the diff meaningful.
-    plan["semantic"] = {"ignore_paths": [
-        r"re:(^|/)(ts|timestamp|time|now|traceId|trace_id|requestId|request_id)$"]}
     if verify:
         plan["verify"] = verify
     if kind == "race":
         plan["race"] = {"concurrency": int(spec.get("concurrency") or 8), "repeats": 1}
+    proxy = resolve_proxy(spec)
+    if proxy:
+        plan["proxy"] = proxy
     return plan
 
 
@@ -545,11 +645,20 @@ def plan(spec: dict) -> dict:
             if isinstance(group, list) and group:
                 vals = [str(x) for x in group]
                 break
-        if not vals:
+        if not vals and kind != "sqli":
             return {"ok": False, "error": f"payload set {kind}.json has no values"}
-        param = params[0] if params else (request_params(req)[0] if request_params(req) else "")
-        for v in vals[:4]:
-            candidates.append((2.0, param, {"value": v, "type": "string", "field": param, "path": ""}))
+        # 逐参数各出一份计划：一次调用 = 一组探测（原来只打 params[0]，其余参数全丢）
+        names = params or request_params(req)[:4]
+        if not names:
+            return {"ok": False, "error": "no parameters found in request"}
+        if kind == "sqli":
+            for name in names:
+                candidates.append((2.0, name, {"value": vals[0] if vals else "1",
+                                               "type": "string", "field": name, "path": ""}))
+        else:
+            for name in names:
+                for v in vals[:4]:
+                    candidates.append((2.0, name, {"value": v, "type": "string", "field": name, "path": ""}))
     elif kind == "bypass":
         base_path = req["path"].partition("?")[0]
         segment = params[0] if params else next((p for p in reversed(base_path.split("/")) if p), "")
@@ -582,7 +691,7 @@ def plan(spec: dict) -> dict:
                                  {"param": param, "score": round(sc, 2),
                                   "seed": {k: s.get(k) for k in ("value", "type", "field", "path")} if s else None},
                                  i)
-        path = PLAN_DIR / f"{now_tag()}-{kind}-{i}.json"
+        path = unique_path(PLAN_DIR, f"{now_tag()}-{kind}-{i}.json")
         path.write_text(json.dumps(plan_obj, ensure_ascii=False, indent=2), encoding="utf-8")
         results.append({"path": str(path), "kind": kind, "param": param,
                         "requests": len(plan_obj["payloads"]),
@@ -607,7 +716,7 @@ def plan(spec: dict) -> dict:
 
 def run_plan(plan_path: Path, spec: dict, out_dir: Path) -> dict:
     try:
-        plan_obj = json.loads(plan_path.read_text(encoding="utf-8-sig"))
+        plan_obj = json.loads(plan_path.read_text(encoding="utf-8"))
     except Exception as exc:
         return {"plan": str(plan_path), "ok": False, "error": f"bad plan: {exc}"}
     first = (plan_obj.get("request_template") or "").split("\n", 1)[0]
@@ -621,9 +730,21 @@ def run_plan(plan_path: Path, spec: dict, out_dir: Path) -> dict:
     cmd = [sys.executable, str(ENGINE), "--plan", str(plan_path), "--out", str(out_dir)]
     if spec.get("dryRun"):
         cmd.append("--dry-run")
+    # 代理：spec 优先，其次 plan 里已有的 proxy；都没有才看环境（死端口哨兵已排除）
+    proxy = str(spec.get("proxy") or "").strip() or str(plan_obj.get("proxy") or "").strip() \
+        or (resolve_proxy(spec) or "")
+    if proxy:
+        cmd += ["--proxy", proxy]
+    # 超时按限速算：单计划要发 (载荷数 + 基线重复) 次请求，不能拍脑袋给 600s
+    try:
+        rate = max(1, int(plan_obj.get("rate_limit_per_min") or 12))
+    except Exception:  # noqa: BLE001
+        rate = 12
+    n_payload = len(plan_obj.get("payloads") or []) or 1
+    budget = 60 + int(n_payload / rate * 60) + 90
     p = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True,
                        encoding="utf-8", errors="replace",
-                       env={**os.environ, "PYTHONIOENCODING": "utf-8"}, timeout=600)
+                       env={**os.environ, "PYTHONIOENCODING": "utf-8"}, timeout=budget)
     diffs = out_dir / "diffs.csv"
     rows = []
     if diffs.exists():
@@ -658,29 +779,39 @@ def run(spec: dict) -> dict:
     target = spec.get("target") or "adhoc"
     base = (EVIDENCE / target / "evidence" / "fuzz") if spec.get("target") else (RUNS)
     base.mkdir(parents=True, exist_ok=True)
+    # 单次调用跑多少份计划：默认 2（DSH bundle 有执行时限，跑多了会被掐成 exit -1）
+    max_plans = int(spec.get("limit") or spec.get("maxPlans") or 2)
+    max_plans = max(1, min(max_plans, 20))
     paths: list[Path] = []
+    all_plans: list[Path] = []
     if spec.get("planPath"):
         p = Path(spec["planPath"])
         if not p.is_absolute():
             p = ROOT / p
         if p.is_dir():
-            paths = sorted(p.glob("*.json"))[:10]
+            all_plans = sorted(p.glob("*.json"))
+            paths = all_plans[:max_plans]
         else:
             paths = [p]
     elif spec.get("planDir"):
         p = Path(spec["planDir"])
         if not p.is_absolute():
             p = ROOT / p
-        paths = sorted(p.glob("*.json"))[:10]
+        all_plans = sorted(p.glob("*.json"))
+        paths = all_plans[:max_plans]
     if not paths:
         return {"ok": False, "error": "planPath or planDir is required"}
     results = []
     for p in paths:
         out_dir = base / f"{now_tag()}-{p.stem}"
+        if out_dir.exists():
+            out_dir = base / unique_path(base, out_dir.name).name
         results.append(run_plan(p, spec, out_dir))
+    skipped = [q.name for q in all_plans[max_plans:]]
     return {"ok": all(r.get("ok") for r in results),
-            "summary": f"run {len(results)} plan(s)",
-            "data": {"runs": results}}
+            "summary": f"run {len(results)} plan(s)"
+                       + (f"，另有 {len(skipped)} 份未跑（加 limit 继续）" if skipped else ""),
+            "data": {"runs": results, "skippedPlans": skipped}}
 
 
 def classify_row(row: dict) -> str:
@@ -697,9 +828,6 @@ def classify_row(row: dict) -> str:
         return "BLOCKED"
     if status in ("403", "429", "503") and "差分" not in verdict:
         return "BLOCKED"
-    # "无差分" 也包含「差分」二字：先判无差分，否则所有无信号行都会被记成差分。
-    if "无差分" in verdict:
-        return "NO_SIGNAL"
     if "差分" in verdict or semantic == "DIFF":
         return "DIFFERENTIAL"
     return "NO_SIGNAL"
@@ -820,13 +948,21 @@ def main() -> int:
     p.add_argument("--kind")
     p.add_argument("--seeds")
     p.add_argument("--params", nargs="*")
+    p.add_argument("--proxy", help="出站代理，如 http://127.0.0.1:7897；写进 plan 并透传给引擎")
+    p.add_argument("--rate", type=int, help="每分钟请求上限（写入 plan）")
+    p.add_argument("--limit", type=int, help="候选计划条数上限")
+    p.add_argument("--scheme", help="http / https")
     p.add_argument("--json", action="store_true")
     args = p.parse_args()
     if args.spec:
         spec = json.loads(Path(args.spec).read_text(encoding="utf-8-sig"))
+        for k, v in (("proxy", args.proxy), ("rate", args.rate), ("limit", args.limit), ("scheme", args.scheme)):
+            if v not in (None, "") and k not in spec:
+                spec[k] = v
     else:
         spec = {"action": args.action, "response": args.response, "request": args.request,
-                "target": args.target, "kind": args.kind, "seeds": args.seeds, "params": args.params}
+                "target": args.target, "kind": args.kind, "seeds": args.seeds, "params": args.params,
+                "proxy": args.proxy, "rate": args.rate, "limit": args.limit, "scheme": args.scheme}
     try:
         res = dispatch(spec)
     except Exception as exc:

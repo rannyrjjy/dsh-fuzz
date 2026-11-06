@@ -9,7 +9,7 @@ value or a read-only object check. It never sends a request without --allow-writ
 when the verify template is a write method.
 
 Usage:
-  python 作战工具\\fuzz\\fuzz_verify.py --plan <plan.json> --run <run-dir> [--dry-run] [--allow-write]
+  python engine/fuzz/fuzz_verify.py --plan <plan.json> --run <run-dir> [--dry-run] [--allow-write]
 """
 from __future__ import annotations
 

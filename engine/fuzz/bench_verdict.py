@@ -6,9 +6,8 @@ Scans every 漏洞记录/**/diffs.csv produced by diffprobe and compares the
 classifier against the engine's own verdict label. No network, no writes.
 
 Usage:
-  python engine/fuzz/bench_verdict.py [--evidence <dir>] [--verbose]
-Exit 0 when every labelled row is classified consistently (or when the evidence
-directory is absent, which simply means there is nothing to regress yet).
+  python engine/fuzz/bench_verdict.py [--verbose]
+Exit 0 only when every labelled row is classified consistently.
 """
 from __future__ import annotations
 
@@ -34,8 +33,6 @@ def expected(row: dict) -> str:
         return "INVALID"
     if "命中防护" in verdict:
         return "BLOCKED"
-    if "无差分" in verdict:
-        return "NO_SIGNAL"
     if "差分" in verdict or semantic == "DIFF":
         return "DIFFERENTIAL"
     if "基线" in verdict or not verdict:
@@ -45,18 +42,13 @@ def expected(row: dict) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--evidence", help="evidence root containing */diffs.csv (default: $DSH_FUZZ_EVIDENCE or <workspace>/漏洞记录)")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
-    rec = Path(args.evidence).resolve() if args.evidence else REC
-    if not rec.is_dir():
-        print(f"skip: no evidence directory at {rec} (nothing to regress)")
-        return 0
     files = 0
     rows = 0
     labels = collections.Counter()
     mismatches = []
-    for p in rec.rglob("diffs.csv"):
+    for p in REC.rglob("diffs.csv"):
         files += 1
         try:
             with io.open(p, "r", encoding="utf-8-sig", errors="replace", newline="") as fh:
@@ -68,7 +60,7 @@ def main() -> int:
                         continue
                     got = fuzz_ops.classify_row(row)
                     if got != exp:
-                        mismatches.append((str(p.relative_to(rec.parent)), row.get("label", ""), exp, got))
+                        mismatches.append((str(p.relative_to(ROOT)), row.get("label", ""), exp, got))
         except Exception:
             continue
     print(f"files={files} rows={rows} labels={dict(labels)}")

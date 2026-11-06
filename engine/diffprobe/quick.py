@@ -16,8 +16,10 @@ quick —— diffprobe 的一行式入口：从 URL 直接开测，不必手写 
   python quick.py ... --dry-run                 # 只渲染不发包
   python quick.py ... --mode paired             # 布尔/时间盲注 A-B 互比
 
-等价旋钮（透传给 diffprobe）：--out --proxy --rate --mode --timeout --insecure
-固定内置：破坏性载荷默认拒发、单线程、命中 403/429/503 即停。
+等价旋钮（透传给 diffprobe）：--out --proxy --mode --timeout --insecure
+                 --threads（默认 8）--delay-ms（默认 50）--sequential
+节奏：默认 8 线程 / 50ms；命中 403/429/503 后自动降为单线程 <6/分钟。
+固定内置：破坏性载荷默认拒发、未知端点不入批量。
 """
 
 import argparse
@@ -55,11 +57,18 @@ def build_plan(a) -> dict:
         "url": a.url,
         "method": method,
         "inject": [inject],
-        "rate_limit_per_min": a.rate,
         "baseline_repeat": a.baseline_repeat,
         "time_band_ms": a.time_band,
         "stop_on_block": [403, 429, 503],
     }
+    if a.rate and a.rate > 0:
+        plan["rate_limit_per_min"] = a.rate
+    if a.sequential:
+        plan["threads"] = 1
+    elif a.threads is not None:
+        plan["threads"] = a.threads
+    if a.delay_ms is not None:
+        plan["delay_ms"] = a.delay_ms
     if a.markers:
         plan["markers"] = [m for m in a.markers.split("|") if m]
     if a.payloads:
@@ -87,7 +96,17 @@ def main(argv=None):
     ap.add_argument("--name", help="本次运行名（默认由 URL 推导）")
     ap.add_argument("--markers", help="WAF/报错特征关键字，竖线分隔")
     ap.add_argument("--header", action="append", help="附加请求头 K: V，可重复")
-    ap.add_argument("--rate", type=int, default=20, help="每分钟请求数，默认 20（只可调低）")
+    ap.add_argument("--rate", type=int, default=0,
+                    help="旧版串行限速（每分钟）；>0 时默认单线程按此速率，默认 0=用并发默认")
+    ap.add_argument("--threads", type=int, default=None,
+                    help="并发线程数（默认 8；1=单线程）")
+    ap.add_argument("--delay-ms", type=int, default=None,
+                    help="每个 worker 的请求间隔毫秒（默认 50）")
+    ap.add_argument("--sequential", action="store_true", help="强制单线程")
+    ap.add_argument("--block-delay-s", type=float, default=10.0,
+                    help="触发防护后的串行间隔秒（默认 10 ⇒ <6/分钟）")
+    ap.add_argument("--max-after-block", type=int, default=20,
+                    help="触发防护后最多补发条数（默认 20）")
     ap.add_argument("--baseline-repeat", type=int, default=2)
     ap.add_argument("--time-band", type=int, default=800, help="耗时差分阈值 ms")
     ap.add_argument("--mode", default="single", choices=["single", "paired", "semantic", "matrix", "sequence"])
@@ -110,6 +129,10 @@ def main(argv=None):
         cmd += ["--proxy", a.proxy]
     if a.mode != "single":
         cmd += ["--mode", a.mode]
+    cmd += ["--block-delay-s", str(a.block_delay_s),
+            "--max-after-block", str(a.max_after_block)]
+    if a.sequential:
+        cmd.append("--sequential")
     if a.insecure:
         cmd.append("--insecure")
     if a.dry_run:
