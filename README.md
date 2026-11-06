@@ -27,14 +27,12 @@
 插件是纯 JS + Python，无构建步骤。任选一种：
 
 ```sh
+# --profile 是必填项：把 <profile> 换成你的 profile 名（桌面版通常为 desktop）
 # 1) 从 GitHub 安装（公开仓库）
-dsh plugin add github:rannyrjjy/dsh-fuzz
-
-# 若本机有多个 profile，用 --profile 指定（把 <profile> 换成你的 profile 名，例如 desktop）
 dsh plugin --profile <profile> add github:rannyrjjy/dsh-fuzz
 
 # 2) 本地安装（git clone / 解压后，把 <plugin-dir> 换成绝对路径）
-dsh plugin add file:<plugin-dir>
+dsh plugin --profile <profile> add file:<plugin-dir>
 ```
 
 > 本地路径写法随平台：Windows 用 `file:D:\tools\dsh-fuzz`，macOS/Linux 用 `file:/opt/dsh-fuzz`。
@@ -158,7 +156,9 @@ dsh-fuzz/
 
 ```sh
 dsh plugin --profile <profile> update dsh-fuzz
-# 或先 remove 再 add
+# 或 remove 后重新 add
+dsh plugin --profile <profile> remove dsh-fuzz
+dsh plugin --profile <profile> add github:rannyrjjy/dsh-fuzz
 ```
 
 ## License
